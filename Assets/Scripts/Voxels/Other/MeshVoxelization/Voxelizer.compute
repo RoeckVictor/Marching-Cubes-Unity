@@ -1,0 +1,101 @@
+#pragma kernel CSMain
+
+// Num threads
+static const int numThreads = 8;
+
+// Struct for the result triangles
+struct Triangle
+{
+    float3 vertexA;
+    float3 vertexB;
+    float3 vertexC;
+};
+
+// Min value of the BoundingBox
+float3 BBMin;
+// Max value of the BoundingBox
+float3 BBMax;
+// Size of the result array in voxels
+int3 gridSize;
+// Size of an individual voxel
+float voxelSize;
+// Number of triangles in the mesh
+int trianglesNum;
+// Triangle array representing the mesh to voxelize
+RWStructuredBuffer<Triangle> triangles;
+
+// Result iso value of the voxels
+RWStructuredBuffer<float> voxels;
+
+// Moller-Trumbore intersection
+// https://en.wikipedia.org/wiki/M%C3%B6ller%E2%80%93Trumbore_intersection_algorithm
+// Returns if the ray intersected with the triangle
+bool RayIntersectsTriangle(float3 rayOrigin, float3 rayVector, int triIndex)
+{
+    const float epsilon = 0.0000001;
+    float3 v0 = triangles[triIndex].vertexA;
+    float3 v1 = triangles[triIndex].vertexB;
+    float3 v2 = triangles[triIndex].vertexC;
+
+    float3 e1, e2, h, s, q;
+    float a, f, u, v;
+
+    e1 = v1-v0;
+    e2 = v2-v0;
+    h = cross(rayVector, e2);
+    a = dot(e1, h);
+    // If ray is parallel to the triangle
+    if (a>-epsilon && a<epsilon)
+        return false;
+
+    f = 1.0f/a;
+    s = rayOrigin-v0;
+    u = f*dot(s, h);
+    if (u<0.0 || u>1.0)
+        return false;
+
+    q = cross(s, e1);
+    v = f*dot(rayVector, q);
+    if (v<0.0 || u+v>1.0)
+        return false;
+
+    float t = f*dot(e2, q);
+    if (t>epsilon)
+    {
+        float3 intersection = rayOrigin+rayVector*t;
+        return true;
+    }
+    return false;
+}
+
+[numthreads(numThreads, numThreads, numThreads)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint intersectionCount = 0;
+    uint intersectionCount2 = 0;
+
+    float3 halfVec = float3(voxelSize/2.0, voxelSize/2.0, voxelSize/2.0);
+    // Start at the voxel center
+    float3 orig = BBMin+halfVec + float3(id.x, id.y, id.z)*voxelSize;
+    float3 dir = float3(1.0, 0.0, 0.0);
+
+    // Computes the number of intersections with the ray (super slow)
+    for(int i=0; i<trianglesNum; i++)
+        if(RayIntersectsTriangle(orig, dir, i))
+            intersectionCount++;
+
+    dir = float3(0.0, 1.0, 0.0);
+
+    // Computes the number of intersection with a different, non collinear ray (super slow again)
+    for(i=0; i<trianglesNum; i++)
+        if(RayIntersectsTriangle(orig, dir, i))
+            intersectionCount2++;
+
+    // If the number of intersections is even, the voxel is outside the mesh,
+    // if it is odd the voxel is inside the mesh
+    // TODO: find a way to compute the "volume" of mater inside the voxel to store a float instead of a bool
+    if (intersectionCount%2 == 0 || intersectionCount2%2 == 0)
+        voxels[id.x+id.y*gridSize.x+id.z*gridSize.x*gridSize.y] = 1.0;
+    else
+        voxels[id.x+id.y*gridSize.x+id.z*gridSize.x*gridSize.y] = -1.0;
+}

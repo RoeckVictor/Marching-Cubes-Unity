@@ -1,0 +1,134 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Num threads
+static const int numThreads = 8;
+
+// Everything further than this from the camera is ignored
+static const float maxDst = 80;
+// Distance where the ray is considered to collide with an object
+static const float epsilon = 0.001f;
+
+float3 position;
+float3 size;
+int shapeType;
+
+// Min value of the BoundingBox
+float3 BBMin;
+// Max value of the BoundingBox
+float3 BBMax;
+// Size of the result array in voxels
+int3 gridSize;
+// Size of an individual voxel
+float voxelSize;
+
+// Result iso value of the voxels
+RWStructuredBuffer<float> voxels;
+
+// Sphere Signed Distance
+float sdSphere(float3 eye, float3 pos, float radius)
+{
+    return distance(eye, pos) - radius;
+}
+
+// Cube Signed Distance
+float sdCube(float3 eye, float3 pos, float3 scale)
+{
+    float3 o = abs(eye - pos) - scale;
+    float ud = length(max(o, 0));
+    float n = max(max(min(o.x, 0), min(o.y, 0)), min(o.z, 0));
+    return ud + n;
+}
+
+// SDFs
+// Torus Signed Distance
+float sdTorus(float3 eye, float3 pos, float2 radius)
+{
+    float2 q = float2(length((eye - pos).xz) - radius.x, eye.y - pos.y);
+    return length(q) - radius.y;
+}
+
+// Cone Signed Distance
+float sdCone(float3 eye, float3 pos, float2 c, float h)
+{
+    float3 p = eye - pos;
+    float q = length(float2(p.xz));
+    return max(dot(c.xy, float2(q, p.y)), -h - p.y);
+}
+
+// Plane Signed Distance
+float sdPlane(float3 p, float3 n, float h)
+{
+    // n must be normalized
+    return dot(p, n) + h;
+}
+
+// Prism Signed Distance (abs?)
+float sdPrism(float3 eye, float3 pos, float2 h)
+{
+    float3 q1 = eye - pos;
+    float3 q2 = abs(q1);
+    return max(q2.z - h.y, max(q2.x * 0.866025 + q1.y * 0.5, -eye.y) - h.x * 0.5);
+}
+
+// Cylinder Signed Distance (not working
+float sdCylinder(float3 eye, float3 pos, float2 h)
+{
+    float2 d = abs(float2(length((eye).xz), eye.y)) - h;
+    return length(max(d, 0.0)) + max(min(d.x, 0), min(d.y, 0));
+}
+
+// Operations
+// Blend function to blend distance between object a and b
+float Blend(float a, float b, float k)
+{
+    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    float blendDst = lerp(b, a, h) - k * h * (1.0 - h);
+    return blendDst;
+}
+
+// Get the distance from the eye depending on the primitive shape
+float GetShapeDistance(float3 eye)
+{
+    switch (shapeType)
+    {
+        // Sphere
+    case 0:
+        return sdSphere(eye, position, size.x);
+        break;
+        // Cube
+    case 1:
+        return sdCube(eye, position, size);
+        break;
+        // Torus
+    case 2:
+        return sdTorus(eye, position, size.xy);
+        break;
+        // Cone
+    case 3:
+        return sdCone(eye, position, size.xy, size.z);
+        break;
+        // Plane
+    case 4:
+        return sdPlane(eye, position, size.x);
+        break;
+        // Prism
+    case 5:
+        return sdPrism(eye, position, size.xy);
+        break;
+        // Cylinder
+    case 6:
+        return sdCylinder(eye, position, size.xy);
+        break;
+    }
+    return maxDst;
+}
+
+[numthreads(numThreads, numThreads, numThreads)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float3 halfVec = float3(voxelSize/2.0, voxelSize/2.0, voxelSize/2.0);
+    float dst = GetShapeDistance(position-gridSize*halfVec+float3(id.x, id.y, id.z)*voxelSize);
+
+    voxels[id.x+id.y*gridSize.x+id.z*gridSize.x*gridSize.y] = dst;
+}

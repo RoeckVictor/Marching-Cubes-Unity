@@ -1,0 +1,169 @@
+﻿#pragma kernel CSMain
+
+// Tables to compute marching cubes
+#include "Assets/Scripts/Voxels/MarchingCubes/MarchTables.compute"
+
+// Num threads
+static const int numThreads = 8;
+
+// Iso value of the voxels
+RWStructuredBuffer<float> voxels;
+
+// Size (in voxels) of the bounding cube
+int3 size;
+// Center of the bounding cube
+float3 center;
+// Size of an individual voxel
+float3 voxelSize;
+// Index of the chunk we are updating
+int3 chunkIndex;
+// Iso level for marching cubes
+float isoLevel;
+
+// Vertex struct for the Triangles
+struct Vertex 
+{
+    float3 position;
+    int2 id;
+};
+
+// Struct for the result triangles
+struct Triangle 
+{
+    Vertex vertexA;
+    Vertex vertexC;
+    Vertex vertexB;
+};
+
+// Resulting mesh after marching
+AppendStructuredBuffer<Triangle> triangles;
+
+// Get the index of a voxel in the voxels array
+// depending on it's coordinates
+int GetVoxelIndex(int x, int y, int z)
+{
+    return x+size.x*y+size.x*size.y*z;
+}
+
+// Get world space voxel position
+float3 TransformPoint(int3 index)
+{
+    return center+(index-size/2.0)*voxelSize;
+}
+
+// Get an id from a position for the vertexes
+int idFromCoord(int3 coord)
+{
+    coord = coord-chunkIndex*(size-int3(1, 1, 1));
+    return GetVoxelIndex(coord.x, coord.y, coord.z);
+}
+
+// Function used to smooth the final mesh
+float3 interpolateVerts(float4 v1, float4 v2)
+{
+    float t = (isoLevel-v1.w)/(v2.w-v1.w);
+    return v1.xyz+t*(v2.xyz-v1.xyz);
+}
+
+// Generates a vertex from two positions and iso values
+Vertex CreateVertex(float4 coordA, float4 coordB)
+{
+    Vertex vertex;
+
+    // Computes id to remove duplicates
+    int indexA = idFromCoord(int3(coordA.xyz));
+    int indexB = idFromCoord(int3(coordB.xyz));
+    vertex.id = int2(min(indexA, indexB), max(indexA, indexB));
+
+    // Computes position
+    // Offset the positions depending on the chunk that is being updated
+    float3 chunkOffset = chunkIndex*voxelSize*(size-int3(1, 1, 1));
+    coordA = float4(TransformPoint(int3(coordA.xyz)), coordA.w);
+    coordB = float4(TransformPoint(int3(coordB.xyz)), coordB.w);
+    vertex.position = interpolateVerts(coordA, coordB)+chunkOffset;
+
+    return vertex;
+}
+
+// ----- Usefull Functions END -----
+
+// ----- Marching Cubes Functions BEGIN -----
+// cubeCorners[8] = {a, b, c, d, e, f, g, h}
+// xyz is the position of the voxel in the chunk grid, w is it's iso value
+//          g______________________h
+//          /|                    /|
+//         / |                   / |
+//        /  |                  /  |
+//       /___|_________________/   |
+//     c|    |                 |d  |
+//      |    |                 |   |
+//      |    |                 |   |
+//      |    |                 |   |
+//   a.y|    |_________________|___|
+//      |   / e                |   /f
+//      |  /                   |  /
+//      | /a.z                 | /
+//      |/_____________________|/
+//      a          a.x        b
+void ProcessVoxelMarchingCubes(int x, int y, int z)
+{
+    // Stop one point before the end because voxel includes neighbouring points
+    if(x>=size.x-1 || y>=size.y-1 || z>=size.z-1)
+        return;
+
+    // 8 corners of the current cube
+    float4 cubeCorners[8] = 
+    {
+        float4(float3(x,y,z), voxels[GetVoxelIndex(x,y,z)]),
+        float4(float3(x+1,y,z), voxels[GetVoxelIndex(x+1,y,z)]),
+        float4(float3(x+1,y,z+1), voxels[GetVoxelIndex(x+1,y,z+1)]),
+        float4(float3(x,y,z+1), voxels[GetVoxelIndex(x,y,z+1)]),
+        float4(float3(x,y+1,z), voxels[GetVoxelIndex(x,y+1,z)]),
+        float4(float3(x+1,y+1,z), voxels[GetVoxelIndex(x+1,y+1,z)]),
+        float4(float3(x+1,y+1,z+1), voxels[GetVoxelIndex(x+1,y+1,z+1)]),
+        float4(float3(x,y+1,z+1), voxels[GetVoxelIndex(x,y+1,z+1)])
+    };
+
+
+    //Set the type of the cell to one of the 256 different cases according to it's verticies 
+    int cellType = 0;
+    for (int i = 0; i < 8; i++)
+    {
+        if (cubeCorners[i].w > isoLevel)
+        {
+            cellType |= 1 << i;
+        }
+    }
+
+    // Create triangles for current cube configuration
+    for (int j = 0; triangulation[cellType][j] != -1; j += 3)
+    {
+        // Get indices of corner points A and B for each of the three edges
+        // of the cube that need to be joined to form the triangle.
+        int a0 = cornerIndexAFromEdge[triangulation[cellType][j]];
+        int b0 = cornerIndexBFromEdge[triangulation[cellType][j]];
+
+        int a1 = cornerIndexAFromEdge[triangulation[cellType][j+1]];
+        int b1 = cornerIndexBFromEdge[triangulation[cellType][j+1]];
+
+        int a2 = cornerIndexAFromEdge[triangulation[cellType][j+2]];
+        int b2 = cornerIndexBFromEdge[triangulation[cellType][j+2]];
+
+        // Set up the triangle
+        Triangle tri;
+        tri.vertexA = CreateVertex(cubeCorners[a0], cubeCorners[b0]);
+        tri.vertexB = CreateVertex(cubeCorners[a1], cubeCorners[b1]);
+        tri.vertexC = CreateVertex(cubeCorners[a2], cubeCorners[b2]);
+
+        triangles.Append(tri);
+    }
+}
+// ----- Marching Cubes Functions END -----
+
+// ---------- MAIN ----------
+[numthreads(numThreads, numThreads, numThreads)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    ProcessVoxelMarchingCubes(id.x, id.y, id.z);
+}
+// --------------------------
